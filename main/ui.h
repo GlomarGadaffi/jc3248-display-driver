@@ -51,6 +51,21 @@ int ui_text_w(const char *s, int scale);
 /* Push the whole framebuffer to the panel (full-screen, top-to-bottom). */
 void ui_flush(ui_t *ui);
 
+/* Band-level flush pieces, for custom flush loops (demo_anim.c streams frames back to
+ * back with them). The frame goes out in UI_BANDS full-width bands, top to bottom,
+ * through two internal-RAM bounce buffers: band b uses buffer (b & 1). Each band costs
+ * one blocking RAMWR/RAMWRC command in esp_lcd, so fewer bands = shorter frame. */
+#define UI_BAND_ROWS  80
+#define UI_BANDS      (LCD_V_RES / UI_BAND_ROWS)
+#define UI_BAND_BYTES (LCD_H_RES * UI_BAND_ROWS * sizeof(uint16_t))
+_Static_assert(LCD_V_RES % UI_BAND_ROWS == 0, "bands must tile the screen");
+/* Copy band `band` of fb into its bounce buffer (the buffer must not be on the bus). */
+void ui_band_stage(const uint16_t *fb, int band);
+/* Queue a staged band; returns true if a transfer-done will follow. */
+bool ui_band_send(esp_lcd_panel_handle_t panel, int band);
+/* Block until the oldest queued band has finished. */
+void ui_band_wait(void);
+
 /* Draw the standard top "back" bar; ui_in_back() tests a touch against it. */
 void ui_back_bar(ui_t *ui);
 bool ui_in_back(uint16_t x, uint16_t y);
