@@ -73,19 +73,26 @@ static QueueHandle_t s_ready, s_free;
 static SemaphoreHandle_t s_exit;
 static volatile uint32_t s_frames, s_overruns, s_no_te;
 static volatile int64_t s_flush_sum, s_flush_max;
+static uint32_t s_edge;   /* flush task only */
+static int64_t s_t0;
+
+/* Called by ui_flush_synced once band 0 is staged: wait for a fresh edge, then go. */
+static void wait_te(void)
+{
+    xSemaphoreTake(s_te, 0);                              /* drop a stale edge */
+    if (xSemaphoreTake(s_te, pdMS_TO_TICKS(50)) != pdTRUE) s_no_te++;
+    s_edge = s_te_edges;
+    s_t0 = esp_timer_get_time();
+}
 
 static void flush_task(void *arg)
 {
     esp_lcd_panel_handle_t panel = arg;
     uint16_t *buf;
     while (xQueueReceive(s_ready, &buf, portMAX_DELAY) == pdTRUE && buf) {
-        xSemaphoreTake(s_te, 0);                          /* drop a stale edge */
-        if (xSemaphoreTake(s_te, pdMS_TO_TICKS(50)) != pdTRUE) s_no_te++;
-        uint32_t edge = s_te_edges;
-        int64_t t0 = esp_timer_get_time();
-        ui_flush(&(ui_t){ .fb = buf, .panel = panel });
-        int64_t d = esp_timer_get_time() - t0;
-        if (s_te_edges != edge) s_overruns++;             /* the next scan began mid-flush */
+        ui_flush_synced(&(ui_t){ .fb = buf, .panel = panel }, wait_te);
+        int64_t d = esp_timer_get_time() - s_t0;
+        if (s_te_edges != s_edge) s_overruns++;           /* the next scan began mid-flush */
         s_flush_sum += d;
         if (d > s_flush_max) s_flush_max = d;
         s_frames++;
@@ -120,8 +127,9 @@ void demo_anim(ui_t *ui, esp_lcd_touch_handle_t tp)
     s_exit = xSemaphoreCreateBinary();
     s_ready = xQueueCreate(2, sizeof(uint16_t *));
     s_free = xQueueCreate(2, sizeof(uint16_t *));
-    s_frames = s_overruns = s_no_te = 0;
+    s_frames = s_overruns = s_no_te = s_te_edges = 0;
     s_flush_sum = s_flush_max = 0;
+    s_te_fall = s_te_rise = s_te_period = s_te_low = s_te_high = 0;
 
     const gpio_config_t te_cfg = {
         .pin_bit_mask = 1ULL << PIN_TE, .mode = GPIO_MODE_INPUT,
@@ -159,8 +167,8 @@ void demo_anim(ui_t *ui, esp_lcd_touch_handle_t tp)
     int ndirty[2] = { 0, 0 };
     float bar_x = 0, tick = 0;
     char hud1[24] = "", hud2[48] = "";
-    int64_t last = esp_timer_get_time(), stat_t = last, render_sum = 0;
-    uint32_t stat_frames = 0, renders = 0;
+    int64_t last = esp_timer_get_time(), stat_t = last, render_sum = 0, stat_flush = 0;
+    uint32_t stat_frames = 0, stat_ovr = 0, stat_note = 0, renders = 0;
     const uint16_t black = 0, bar_c = ui_rgb(255, 255, 255);
     uint16_t x, y;
 
@@ -211,20 +219,28 @@ void demo_anim(ui_t *ui, esp_lcd_touch_handle_t tp)
         renders++;
         xQueueSend(s_ready, &buf, portMAX_DELAY);
 
-        if (now - stat_t >= 1000000) {
-            uint32_t f = s_frames;
-            float fps = (f - stat_frames) * 1e6f / (now - stat_t);
-            float flush_avg = f ? s_flush_sum / 1000.0f / f : 0;
+        if (now - stat_t >= 1000000) {   /* per-window stats: each line stands on its own */
+            uint32_t f = s_frames, df = f - stat_frames, ovr = s_overruns - stat_ovr, note = s_no_te - stat_note;
+            int64_t fsum = s_flush_sum;
+            float fps = df * 1e6f / (now - stat_t);
+            float flush_avg = df ? (fsum - stat_flush) / 1000.0f / df : 0;
+            float flush_max = s_flush_max / 1000.0f;
+            s_flush_max = 0;
             snprintf(hud1, sizeof hud1, "%.1f FPS", fps);
-            snprintf(hud2, sizeof hud2, "flush %.1fms TE %.1fms ovr %lu",
-                     flush_avg, s_te_period / 1000.0f, (unsigned long)s_overruns);
+            snprintf(hud2, sizeof hud2, "flush %.1fms TE %.1fms ovr %lu/s",
+                     flush_avg, s_te_period / 1000.0f, (unsigned long)ovr);
             ESP_LOGI(TAG, "%.1f fps | flush avg %.2f max %.2f ms | render avg %.2f ms | "
-                     "TE period %.2f low %.2f high %.2f ms | overruns %lu | no-TE %lu",
-                     fps, flush_avg, s_flush_max / 1000.0f, render_sum / 1000.0f / renders,
+                     "TE period %.2f low %.2f high %.2f ms | overruns %lu/%lu frames | no-TE %lu",
+                     fps, flush_avg, flush_max, render_sum / 1000.0f / renders,
                      s_te_period / 1000.0f, s_te_low / 1000.0f, s_te_high / 1000.0f,
-                     (unsigned long)s_overruns, (unsigned long)s_no_te);
+                     (unsigned long)ovr, (unsigned long)df, (unsigned long)note);
             stat_t = now;
             stat_frames = f;
+            stat_flush = fsum;
+            stat_ovr += ovr;
+            stat_note += note;
+            render_sum = 0;
+            renders = 0;
         }
     }
 

@@ -58,6 +58,7 @@ typedef struct {
     uint8_t colmod_val; // save surrent value of LCD_CMD_COLMOD register
     const axs15231b_lcd_init_cmd_t *init_cmds;
     uint16_t init_cmds_size;
+    int caset_x0, caset_x1;  // column window last sent with CASET; -1 = unknown, must resend
     struct {
         unsigned int use_qspi_interface: 1;
         unsigned int reset_level: 1;
@@ -192,6 +193,7 @@ static esp_err_t panel_axs15231b_reset(esp_lcd_panel_t *panel)
         ESP_RETURN_ON_ERROR(tx_param(axs15231b, io, LCD_CMD_SWRESET, NULL, 0), TAG, "send SWRESET failed");
         vTaskDelay(pdMS_TO_TICKS(120)); // spec, wait at least 5m before sending new command
     }
+    axs15231b->caset_x0 = axs15231b->caset_x1 = -1;
 
     return ESP_OK;
 }
@@ -292,6 +294,7 @@ static esp_err_t panel_axs15231b_init(esp_lcd_panel_t *panel)
         vTaskDelay(pdMS_TO_TICKS(init_cmds[i].delay_ms));
     }
     ESP_LOGI(TAG, "send init commands success");
+    axs15231b->caset_x0 = axs15231b->caset_x1 = -1;   // the table may have set its own window
 
     return ESP_OK;
 }
@@ -313,13 +316,20 @@ static esp_err_t panel_axs15231b_draw_bitmap(esp_lcd_panel_t *panel, int x_start
     y_start += axs15231b->y_gap;
     y_end += axs15231b->y_gap;
 
-    // define an area of frame memory where MCU can access
-    ESP_RETURN_ON_ERROR(tx_param(axs15231b, io, LCD_CMD_CASET, (uint8_t[]) {
-        (x_start >> 8) & 0xFF,
-        x_start & 0xFF,
-        ((x_end - 1) >> 8) & 0xFF,
-        (x_end - 1) & 0xFF,
-    }, 4), TAG, "send CASET failed");
+    // define an area of frame memory where MCU can access. Skip it when the column window is
+    // unchanged (every full-width band): esp_lcd's tx_param drains all queued color DMA and then
+    // runs a polling transaction, so a redundant CASET per band stalls the bus for nothing.
+    if (x_start != axs15231b->caset_x0 || x_end - 1 != axs15231b->caset_x1) {
+        axs15231b->caset_x0 = axs15231b->caset_x1 = -1;
+        ESP_RETURN_ON_ERROR(tx_param(axs15231b, io, LCD_CMD_CASET, (uint8_t[]) {
+            (x_start >> 8) & 0xFF,
+            x_start & 0xFF,
+            ((x_end - 1) >> 8) & 0xFF,
+            (x_end - 1) & 0xFF,
+        }, 4), TAG, "send CASET failed");
+        axs15231b->caset_x0 = x_start;
+        axs15231b->caset_x1 = x_end - 1;
+    }
 
     // QSPI path (matches the known-good NorthernMan54/Espressif AXS15231B driver): RASET is
     // intentionally NOT sent per-flush. The init sequence sets the full 0..479 row window, and

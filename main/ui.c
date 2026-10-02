@@ -11,7 +11,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-#define BAND_ROWS 40   /* flush in 40-row bands (480 % 40 == 0) */
+#define BAND_ROWS 80   /* flush in 80-row bands (480 % 80 == 0); each band costs one blocking
+                        * RAMWR/RAMWRC command, so fewer bands = shorter frame */
 
 /* The framebuffer lives in PSRAM; DMAing straight from it to the panel can
  * underflow the SPI TX FIFO when another bus master (e.g. SDMMC) contends for
@@ -45,7 +46,7 @@ void ui_init(ui_t *ui)
      * FIFO and wedges the panel — so a failed bounce/sem alloc is a fatal
      * misconfiguration, not a soft fallback. Abort loudly rather than run degraded. */
     if (!s_done || !s_bounce[0] || !s_bounce[1])
-        ESP_LOGE("ui", "bounce/sem alloc failed (need ~50KB internal DMA RAM)");
+        ESP_LOGE("ui", "bounce/sem alloc failed (need ~100KB internal DMA RAM)");
     ESP_ERROR_CHECK((s_done && s_bounce[0] && s_bounce[1]) ? ESP_OK : ESP_ERR_NO_MEM);
 }
 
@@ -124,6 +125,11 @@ int ui_text_w(const char *s, int scale)
 
 void ui_flush(ui_t *ui)
 {
+    ui_flush_synced(ui, NULL);
+}
+
+void ui_flush_synced(ui_t *ui, void (*sync)(void))
+{
     /* Full-screen, top-to-bottom in full-width bands: matches the QSPI driver's
      * RAMWR(top band) + RAMWRC(continuation) scheme. Double-buffered: band N+1's
      * memcpy overlaps band N's DMA. */
@@ -135,6 +141,7 @@ void ui_flush(ui_t *ui)
         if (inflight == 2) { xSemaphoreTake(s_done, portMAX_DELAY); inflight--; }
         uint16_t *buf = s_bounce[band & 1];
         memcpy(buf, &ui->fb[y * LCD_H_RES], LCD_H_RES * BAND_ROWS * sizeof(uint16_t));
+        if (band == 0 && sync) sync();   /* band 0 is staged: the bus starts right on the cue */
         /* Only wait for completion if the color transfer was actually queued:
          * draw_bitmap propagates errors and may return before issuing tx_color
          * (e.g. CASET failed), in which case no on_color_trans_done arrives. */

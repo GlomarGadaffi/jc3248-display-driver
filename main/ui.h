@@ -50,6 +50,9 @@ int ui_text_w(const char *s, int scale);
 
 /* Push the whole framebuffer to the panel (full-screen, top-to-bottom). */
 void ui_flush(ui_t *ui);
+/* Same, but stage the first band, then call sync() (e.g. wait for a TE edge) before any
+ * pixel goes on the bus. */
+void ui_flush_synced(ui_t *ui, void (*sync)(void));
 
 /* Draw the standard top "back" bar; ui_in_back() tests a touch against it. */
 void ui_back_bar(ui_t *ui);
