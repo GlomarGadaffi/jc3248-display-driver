@@ -25,6 +25,11 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # the FATFS/SDMMC mount (both deep stack users). The 3584 B default is too small.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
+# Console on the native USB-Serial/JTAG port, the one behind the board's USB-C. The IDF
+# default puts it on UART0 (GPIO43/44, the 4P JST header) and leaves USB-Serial/JTAG as a
+# secondary console, which silently drops output whenever its FIFO can't drain.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
 # --- USB Mass Storage (the "Mount as USB Drive" mode) ---
 CONFIG_TINYUSB_MSC_ENABLED=y
 CONFIG_TINYUSB_MSC_BUFSIZE=8192
