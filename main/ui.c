@@ -11,8 +11,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-#define BAND_ROWS 80   /* flush in 80-row bands (480 % 80 == 0); each band costs one blocking
-                        * RAMWR/RAMWRC command, so fewer bands = shorter frame */
 
 /* The framebuffer lives in PSRAM; DMAing straight from it to the panel can
  * underflow the SPI TX FIFO when another bus master (e.g. SDMMC) contends for
@@ -40,7 +38,7 @@ void ui_init(ui_t *ui)
     if (!s_done) s_done = xSemaphoreCreateCounting(2, 0);
     for (int i = 0; i < 2; i++)
         if (!s_bounce[i])
-            s_bounce[i] = heap_caps_malloc(LCD_H_RES * BAND_ROWS * sizeof(uint16_t),
+            s_bounce[i] = heap_caps_malloc(UI_BAND_BYTES,
                                            MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     /* On this board, DMAing the framebuffer straight from PSRAM underflows the SPI
      * FIFO and wedges the panel — so a failed bounce/sem alloc is a fatal
@@ -125,30 +123,38 @@ int ui_text_w(const char *s, int scale)
 
 void ui_flush(ui_t *ui)
 {
-    ui_flush_synced(ui, NULL);
-}
-
-void ui_flush_synced(ui_t *ui, void (*sync)(void))
-{
     /* Full-screen, top-to-bottom in full-width bands: matches the QSPI driver's
      * RAMWR(top band) + RAMWRC(continuation) scheme. Double-buffered: band N+1's
      * memcpy overlaps band N's DMA. */
     if (!s_bounce[0] || !s_bounce[1] || !s_done) return;  /* unreachable: ui_init aborts on alloc failure */
-    int inflight = 0, band = 0;
-    for (int y = 0; y < LCD_V_RES; y += BAND_ROWS, band++) {
+    int inflight = 0;
+    for (int band = 0; band < UI_BANDS; band++) {
         /* Free a buffer before reusing it. Transfers complete in FIFO order, so
          * taking one give means the oldest (the buffer we're about to reuse) is done. */
-        if (inflight == 2) { xSemaphoreTake(s_done, portMAX_DELAY); inflight--; }
-        uint16_t *buf = s_bounce[band & 1];
-        memcpy(buf, &ui->fb[y * LCD_H_RES], LCD_H_RES * BAND_ROWS * sizeof(uint16_t));
-        if (band == 0 && sync) sync();   /* band 0 is staged: the bus starts right on the cue */
-        /* Only wait for completion if the color transfer was actually queued:
-         * draw_bitmap propagates errors and may return before issuing tx_color
-         * (e.g. CASET failed), in which case no on_color_trans_done arrives. */
-        if (esp_lcd_panel_draw_bitmap(ui->panel, 0, y, LCD_H_RES, y + BAND_ROWS, buf) == ESP_OK)
-            inflight++;
+        if (inflight == 2) { ui_band_wait(); inflight--; }
+        ui_band_stage(ui->fb, band);
+        if (ui_band_send(ui->panel, band)) inflight++;
     }
-    while (inflight > 0) { xSemaphoreTake(s_done, portMAX_DELAY); inflight--; }
+    while (inflight > 0) { ui_band_wait(); inflight--; }
+}
+
+void ui_band_stage(const uint16_t *fb, int band)
+{
+    memcpy(s_bounce[band & 1], &fb[band * UI_BAND_ROWS * LCD_H_RES], UI_BAND_BYTES);
+}
+
+bool ui_band_send(esp_lcd_panel_handle_t panel, int band)
+{
+    int y = band * UI_BAND_ROWS;
+    /* Only count it in flight if the color transfer was actually queued: draw_bitmap
+     * propagates errors and may return before issuing tx_color (e.g. CASET failed),
+     * in which case no on_color_trans_done arrives. */
+    return esp_lcd_panel_draw_bitmap(panel, 0, y, LCD_H_RES, y + UI_BAND_ROWS, s_bounce[band & 1]) == ESP_OK;
+}
+
+void ui_band_wait(void)
+{
+    xSemaphoreTake(s_done, portMAX_DELAY);
 }
 
 void ui_back_bar(ui_t *ui)

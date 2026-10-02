@@ -73,30 +73,59 @@ static QueueHandle_t s_ready, s_free;
 static SemaphoreHandle_t s_exit;
 static volatile uint32_t s_frames, s_overruns, s_no_te;
 static volatile int64_t s_flush_sum, s_flush_max;
-static uint32_t s_edge;   /* flush task only */
-static int64_t s_t0;
+static volatile uint32_t s_late;
 
-/* Called by ui_flush_synced once band 0 is staged: wait for a fresh edge, then go. */
-static void wait_te(void)
+/* Start at most one frame per edge. An unused edge that fired under LATE_OK_US ago still
+ * counts: starting that late keeps the writer behind the scan, so it stays tear-free,
+ * and waiting a whole period for the next edge would halve the frame rate instead. */
+#define LATE_OK_US 2000
+static void wait_te(uint32_t *used)
 {
-    xSemaphoreTake(s_te, 0);                              /* drop a stale edge */
-    if (xSemaphoreTake(s_te, pdMS_TO_TICKS(50)) != pdTRUE) s_no_te++;
-    s_edge = s_te_edges;
-    s_t0 = esp_timer_get_time();
+    if (s_te_edges == *used || esp_timer_get_time() - s_te_fall > LATE_OK_US) {
+        xSemaphoreTake(s_te, 0);                          /* drop a stale edge */
+        if (xSemaphoreTake(s_te, pdMS_TO_TICKS(50)) != pdTRUE) s_no_te++;
+    } else {
+        xSemaphoreTake(s_te, 0);
+        s_late++;
+    }
+    *used = s_te_edges;
 }
+
+/* Streams frames back to back. While a frame's last band is on the bus, the next frame's
+ * band 0 is staged into the other bounce buffer, so the only gap between frames is the
+ * wait for the next TE edge. UI_BANDS is even, so the last band and band 0 never share
+ * a bounce buffer. */
+_Static_assert(UI_BANDS % 2 == 0, "last band and next band 0 must use different bounce buffers");
 
 static void flush_task(void *arg)
 {
     esp_lcd_panel_handle_t panel = arg;
-    uint16_t *buf;
-    while (xQueueReceive(s_ready, &buf, portMAX_DELAY) == pdTRUE && buf) {
-        ui_flush_synced(&(ui_t){ .fb = buf, .panel = panel }, wait_te);
-        int64_t d = esp_timer_get_time() - s_t0;
-        if (s_te_edges != s_edge) s_overruns++;           /* the next scan began mid-flush */
+    uint16_t *buf, *next;
+    uint32_t used = 0;
+    if (xQueueReceive(s_ready, &buf, portMAX_DELAY) != pdTRUE) buf = NULL;
+    if (buf) ui_band_stage(buf, 0);
+    while (buf) {
+        wait_te(&used);
+        int64_t t0 = esp_timer_get_time();
+        int inflight = 0;
+        for (int band = 0; band < UI_BANDS; band++) {
+            if (band > 0) {
+                if (inflight == 2) { ui_band_wait(); inflight--; }
+                ui_band_stage(buf, band);
+            }
+            if (ui_band_send(panel, band)) inflight++;
+        }
+        xQueueSend(s_free, &buf, portMAX_DELAY);          /* every band is copied out: render may reuse it */
+        if (inflight == 2) { ui_band_wait(); inflight--; } /* frees band 0's bounce buffer */
+        xQueueReceive(s_ready, &next, portMAX_DELAY);
+        if (next) ui_band_stage(next, 0);                  /* overlaps the last band's DMA */
+        while (inflight > 0) { ui_band_wait(); inflight--; }
+        int64_t d = esp_timer_get_time() - t0;
+        if (s_te_edges != used) s_overruns++;             /* the next scan began mid-flush */
         s_flush_sum += d;
         if (d > s_flush_max) s_flush_max = d;
         s_frames++;
-        xQueueSend(s_free, &buf, portMAX_DELAY);
+        buf = next;
     }
     xSemaphoreGive(s_exit);
     vTaskDelete(NULL);
@@ -127,7 +156,7 @@ void demo_anim(ui_t *ui, esp_lcd_touch_handle_t tp)
     s_exit = xSemaphoreCreateBinary();
     s_ready = xQueueCreate(2, sizeof(uint16_t *));
     s_free = xQueueCreate(2, sizeof(uint16_t *));
-    s_frames = s_overruns = s_no_te = s_te_edges = 0;
+    s_frames = s_overruns = s_no_te = s_te_edges = s_late = 0;
     s_flush_sum = s_flush_max = 0;
     s_te_fall = s_te_rise = s_te_period = s_te_low = s_te_high = 0;
 
@@ -168,7 +197,7 @@ void demo_anim(ui_t *ui, esp_lcd_touch_handle_t tp)
     float bar_x = 0, tick = 0;
     char hud1[24] = "", hud2[48] = "";
     int64_t last = esp_timer_get_time(), stat_t = last, render_sum = 0, stat_flush = 0;
-    uint32_t stat_frames = 0, stat_ovr = 0, stat_note = 0, renders = 0;
+    uint32_t stat_frames = 0, stat_ovr = 0, stat_note = 0, stat_late = 0, renders = 0;
     const uint16_t black = 0, bar_c = ui_rgb(255, 255, 255);
     uint16_t x, y;
 
@@ -221,6 +250,7 @@ void demo_anim(ui_t *ui, esp_lcd_touch_handle_t tp)
 
         if (now - stat_t >= 1000000) {   /* per-window stats: each line stands on its own */
             uint32_t f = s_frames, df = f - stat_frames, ovr = s_overruns - stat_ovr, note = s_no_te - stat_note;
+            uint32_t late = s_late - stat_late;
             int64_t fsum = s_flush_sum;
             float fps = df * 1e6f / (now - stat_t);
             float flush_avg = df ? (fsum - stat_flush) / 1000.0f / df : 0;
@@ -230,15 +260,16 @@ void demo_anim(ui_t *ui, esp_lcd_touch_handle_t tp)
             snprintf(hud2, sizeof hud2, "flush %.1fms TE %.1fms ovr %lu/s",
                      flush_avg, s_te_period / 1000.0f, (unsigned long)ovr);
             ESP_LOGI(TAG, "%.1f fps | flush avg %.2f max %.2f ms | render avg %.2f ms | "
-                     "TE period %.2f low %.2f high %.2f ms | overruns %lu/%lu frames | no-TE %lu",
+                     "TE period %.2f low %.2f high %.2f ms | overruns %lu/%lu frames | late starts %lu | no-TE %lu",
                      fps, flush_avg, flush_max, render_sum / 1000.0f / renders,
                      s_te_period / 1000.0f, s_te_low / 1000.0f, s_te_high / 1000.0f,
-                     (unsigned long)ovr, (unsigned long)df, (unsigned long)note);
+                     (unsigned long)ovr, (unsigned long)df, (unsigned long)late, (unsigned long)note);
             stat_t = now;
             stat_frames = f;
             stat_flush = fsum;
             stat_ovr += ovr;
             stat_note += note;
+            stat_late += late;
             render_sum = 0;
             renders = 0;
         }
