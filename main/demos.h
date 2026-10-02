@@ -19,3 +19,4 @@ void demo_touchpaint(ui_t *ui, esp_lcd_touch_handle_t tp);
 void demo_sdcard(ui_t *ui, esp_lcd_touch_handle_t tp);
 void demo_audio(ui_t *ui, esp_lcd_touch_handle_t tp);
 void demo_wifi_battery(ui_t *ui, esp_lcd_touch_handle_t tp);
+void demo_anim(ui_t *ui, esp_lcd_touch_handle_t tp);

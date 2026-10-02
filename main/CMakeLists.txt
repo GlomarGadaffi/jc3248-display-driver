@@ -6,6 +6,7 @@ idf_component_register(
         "demo_sdcard.c"
         "demo_audio.c"
         "demo_wifi_battery.c"
+        "demo_anim.c"
         "usb_msc.c"
     INCLUDE_DIRS "."
     REQUIRES

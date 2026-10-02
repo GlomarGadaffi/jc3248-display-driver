@@ -233,6 +233,7 @@ static const axs15231b_lcd_init_cmd_t vendor_specific_init_default[] = {
     {0xBB, (uint8_t[]){0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 8, 0},
     {0x13, NULL, 0, 0},     // NORON  - no parameters
     {0x11, NULL, 0, 120},   // SLPOUT - no parameters, 120ms wait
+    {0x35, (uint8_t[]){0x00}, 1, 0},   // TEON, V-blank only: drives TE (GPIO38) for frame pacing
     {0x2C, (uint8_t[]){0x00, 0x00, 0x00, 0x00}, 4, 0},
     {0x2A, (uint8_t[]){0x00, 0x00, 0x01, 0x3f}, 4, 0},
     {0x2B, (uint8_t[]){0x00, 0x00, 0x01, 0xdf}, 4, 0},

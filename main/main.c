@@ -127,6 +127,7 @@ static const demo_t DEMOS[] = {
     { "microSD",      demo_sdcard },
     { "Audio",        demo_audio },
     { "WiFi+Battery", demo_wifi_battery },
+    { "Animation",    demo_anim },
 };
 #define NDEMOS (sizeof(DEMOS) / sizeof(DEMOS[0]))
 
@@ -134,6 +135,7 @@ static void draw_menu(ui_t *ui)
 {
     const uint16_t cols[NDEMOS] = {
         ui_rgb(200, 40, 40), ui_rgb(40, 160, 40), ui_rgb(40, 80, 200), ui_rgb(200, 140, 30),
+        ui_rgb(140, 40, 200),
     };
     int bandh = LCD_V_RES / NDEMOS;
     for (size_t i = 0; i < NDEMOS; i++) {

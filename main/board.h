@@ -19,6 +19,7 @@
 #define PIN_D2      40
 #define PIN_D3      39
 #define PIN_BL       1   /* backlight — PWM driven */
+#define PIN_TE      38   /* tearing-effect output: low while the panel scans GRAM, high in blanking */
 #define LCD_HOST    SPI2_HOST
 
 /* ---- Capacitive touch: AXS15231B over I2C (addr 0x3B) ---- */
