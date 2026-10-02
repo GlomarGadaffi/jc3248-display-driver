@@ -172,8 +172,12 @@ void demo_anim(ui_t *ui, esp_lcd_touch_handle_t tp)
         .pull_up_en = GPIO_PULLUP_ENABLE, .intr_type = GPIO_INTR_ANYEDGE,
     };
     gpio_config(&te_cfg);
-    esp_err_t err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(err);
+    static bool isr_service;   /* IDF logs an E line if it's installed twice; once per boot */
+    if (!isr_service) {
+        esp_err_t err = gpio_install_isr_service(0);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(err);
+        isr_service = true;
+    }
     gpio_isr_handler_add(PIN_TE, te_isr, NULL);
 
     vTaskDelay(pdMS_TO_TICKS(200));
