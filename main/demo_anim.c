@@ -79,6 +79,13 @@ static volatile uint32_t s_late;
  * counts: starting that late keeps the writer behind the scan, so it stays tear-free,
  * and waiting a whole period for the next edge would halve the frame rate instead. */
 #define LATE_OK_US 2000
+/* ponytail: 60 fps holds with ~0.3 ms to spare. On COM8: flush max 15.88 ms vs TE period
+ * 16.19 ms, one unit, 40 MHz QSPI (the S3 GPSPI clock is 80/(pre*n) with n >= 2, so nothing
+ * exists between 40 and 80; see spi_ll_master_cal_clock). A panel with a shorter TE period
+ * shows periodic hitches instead of a clean 30: each frame starts a bit later until the
+ * start falls outside LATE_OK_US. Upgrade path: fewer bands (UI_BAND_ROWS 96/120 if internal
+ * RAM allows), or one CS-held RAMWR stream via the raw spi_device API, which removes the
+ * blocking command per band that esp_lcd's tx_color adds. */
 static void wait_te(uint32_t *used)
 {
     if (s_te_edges == *used || esp_timer_get_time() - s_te_fall > LATE_OK_US) {
